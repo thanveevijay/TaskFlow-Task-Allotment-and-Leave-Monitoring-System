@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import {
   CheckSquare, BarChart3, Users, Calendar, Shield, Zap, ArrowRight,
   ChevronRight, Star, TrendingUp, Menu, X, Sparkles,
-  Target, Award, Globe, Play
+  Target, Award, Globe
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -116,7 +116,7 @@ function NavBar({ onLogin }: { onLogin: (role: "manager" | "employee") => void }
         <div className="hidden md:flex items-center justify-end gap-3 w-1/3">
           <button onClick={() => onLogin("employee")}
             className="text-sm font-medium text-slate-300 hover:text-white px-4 py-2 rounded-xl transition-colors">
-            Employee Login
+            Employee Portal
           </button>
           <button onClick={() => onLogin("manager")}
             className="text-sm font-semibold bg-gradient-to-r from-sky-500 to-blue-600 text-white px-5 py-2 rounded-xl shadow-lg shadow-sky-500/25 hover:shadow-sky-500/40 hover:-translate-y-0.5 transition-all duration-200">
@@ -153,7 +153,7 @@ function NavBar({ onLogin }: { onLogin: (role: "manager" | "employee") => void }
   );
 }
 
-function HeroSection({ onLogin, onWatchDemo }: { onLogin: (role: "manager" | "employee") => void; onWatchDemo: () => void }) {
+function HeroSection({ onLogin }: { onLogin: (role: "manager" | "employee") => void }) {
   return (
     <section className="relative min-h-screen flex items-center justify-center hero-mesh overflow-hidden">
       {/* Animated orbs */}
@@ -188,14 +188,14 @@ function HeroSection({ onLogin, onWatchDemo }: { onLogin: (role: "manager" | "em
           <button onClick={() => onLogin("employee")}
             className="group relative flex items-center gap-3 bg-gradient-to-br from-sky-500 to-blue-600 text-white font-bold px-8 py-4 rounded-2xl text-base shadow-xl shadow-sky-500/30 overflow-hidden card-lift">
             <div className="absolute inset-0 bg-white/20 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 ease-in-out skew-x-12" />
-            Launch Workspace
+            Employee Portal
             <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
           </button>
-          <button onClick={onWatchDemo} className="group flex items-center gap-3 text-slate-300 hover:text-white font-semibold px-8 py-4 rounded-2xl border border-white/20 hover:border-sky-500/50 hover:bg-sky-500/10 hover:shadow-[0_0_20px_rgba(14,165,233,0.2)] transition-all text-base">
+          <button onClick={() => onLogin("manager")} className="group flex items-center gap-3 text-slate-300 hover:text-white font-semibold px-8 py-4 rounded-2xl border border-white/20 hover:border-sky-500/50 hover:bg-sky-500/10 hover:shadow-[0_0_20px_rgba(14,165,233,0.2)] transition-all text-base">
             <div className="w-8 h-8 rounded-full bg-white/10 group-hover:bg-sky-500/20 flex items-center justify-center transition-colors">
-              <Play className="w-3.5 h-3.5 fill-current text-white group-hover:text-sky-400" />
+              <Shield className="w-3.5 h-3.5 text-white group-hover:text-sky-400" />
             </div>
-            Watch 2-min Demo
+            Manager Portal
           </button>
         </div>
 
@@ -426,42 +426,8 @@ function Footer() {
   );
 }
 
-function VideoModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
-      {/* Backdrop */}
-      <div 
-        className="absolute inset-0 bg-black/80 backdrop-blur-md animate-in fade-in duration-300" 
-        onClick={onClose} 
-      />
-      
-      {/* Modal Content */}
-      <div className="relative w-full max-w-5xl aspect-video glass-dark rounded-3xl overflow-hidden shadow-2xl border border-white/10 animate-in zoom-in-95 duration-300">
-        <button 
-          onClick={onClose}
-          className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full bg-black/40 hover:bg-black/60 text-white flex items-center justify-center transition-colors border border-white/10"
-        >
-          <X className="w-5 h-5" />
-        </button>
-        
-        {/* Placeholder Demo Video (YouTube Embed) */}
-        <iframe 
-          className="w-full h-full"
-          src="https://www.youtube.com/embed/dQw4w9WgXcQ?autoplay=1" 
-          title="TaskFlow Demo Video"
-          frameBorder="0"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
-          allowFullScreen
-        ></iframe>
-      </div>
-    </div>
-  );
-}
-
 export default function LandingPage() {
   const navigate = useNavigate();
-  const [showVideo, setShowVideo] = useState(false);
 
   const handleLogin = (role: "manager" | "employee") => {
     navigate(`/login?role=${role}`);
@@ -471,7 +437,7 @@ export default function LandingPage() {
     <div className="min-h-screen">
       <NavBar onLogin={handleLogin} />
       
-      <HeroSection onLogin={handleLogin} onWatchDemo={() => setShowVideo(true)} />
+      <HeroSection onLogin={handleLogin} />
 
       <StatsBar />
       <FeaturesSection />
@@ -479,8 +445,6 @@ export default function LandingPage() {
       <TestimonialsSection />
       <CTASection onLogin={handleLogin} />
       <Footer />
-      
-      <VideoModal isOpen={showVideo} onClose={() => setShowVideo(false)} />
     </div>
   );
 }

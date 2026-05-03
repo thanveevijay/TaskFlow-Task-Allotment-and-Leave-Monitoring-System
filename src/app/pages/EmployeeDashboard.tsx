@@ -1,17 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '../components/ui/button';
 import {
   CheckSquare, Clock, Calendar, Wallet,
-  Download, CheckCircle, AlertTriangle,
+  Download, CheckCircle, AlertTriangle, Bell, RefreshCw, Heart,
 } from 'lucide-react';
-import { getMonthlyPayroll, type PayrollRow } from '../api/payroll';
+import { getMonthlyPayroll, requestPayslip, type PayrollRow } from '../api/payroll';
 import { formatINR } from '../lib/formatMoney';
 import { getReports, type ReportsResponse } from '../api/reports';
-import { getLeaveRequests } from '../api/leave';
-import { getStockQuote } from '../api/stock';
 import { getRecentKudos } from '../api/kudos';
-import { getOnboardingChecklist } from '../api/onboarding';
-import { updateTaskStatus } from '../api/tasks';
+import { updateTaskStatus, toggleTaskChecklist } from '../api/tasks';
+import { getInAppNotifications, markAllNotificationsRead, type InAppNotification } from '../api/notifications';
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
@@ -84,9 +82,10 @@ function ProgressRing({ pct }: { pct: number }) {
 }
 
 /* ─── Kanban task card ─── */
-function TaskCard({ task, getPriorityColor }: { 
+function TaskCard({ task, getPriorityColor, setLocalTasks }: { 
   task: any; 
   getPriorityColor: (p: string) => { bg: string; text: string; border: string };
+  setLocalTasks: React.Dispatch<React.SetStateAction<any[]>>;
 }) {
   const daysUntil = task.deadline ? Math.ceil((new Date(task.deadline).getTime() - Date.now()) / 86400000) : 999;
   const colors = getPriorityColor(task.priority);
@@ -114,10 +113,10 @@ function TaskCard({ task, getPriorityColor }: {
                 {task.deadline ? new Date(task.deadline).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'No date'}
               </span>
             </div>
-            {task.checklist && task.checklist.length > 0 && (
+            {task.checklists && task.checklists.length > 0 && (
               <div className="flex items-center gap-1 text-[10px] font-bold text-white/20">
                 <CheckCircle className="w-3 h-3" />
-                {task.checklist.filter((c: any) => c.isComplete).length}/{task.checklist.length}
+                {task.checklists.filter((c: any) => c.isCompleted).length}/{task.checklists.length}
               </div>
             )}
           </div>
@@ -144,6 +143,36 @@ function TaskCard({ task, getPriorityColor }: {
               </div>
             </div>
           </div>
+          {task.checklists && task.checklists.length > 0 && (
+            <div className="space-y-3">
+              <span className="text-[10px] font-bold text-white/20 uppercase tracking-widest">Checklist</span>
+              <div className="space-y-2">
+                {task.checklists.map((item: any) => (
+                  <div 
+                    key={item.id} 
+                    className="flex items-center gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/5 hover:bg-white/[0.05] transition-colors group/item"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        const updated = await toggleTaskChecklist(task.id, item.id, !item.isCompleted);
+                        setLocalTasks(prev => prev.map(t => t.id === task.id ? updated : t));
+                        toast.success('Checklist updated');
+                      } catch (err: any) {
+                        toast.error(err?.response?.data?.message || 'Update failed');
+                      }
+                    }}
+                  >
+                    <div className={`w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${item.isCompleted ? 'bg-violet-500 border-violet-500' : 'border-white/20 group-hover/item:border-white/40'}`}>
+                      {item.isCompleted && <CheckCircle className="w-3.5 h-3.5 text-white" />}
+                    </div>
+                    <span className={`text-sm transition-colors ${item.isCompleted ? 'text-white/40 line-through' : 'text-white/80'}`}>
+                      {item.text}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>
@@ -155,31 +184,72 @@ export default function EmployeeDashboard() {
   const [payrollRow, setPayrollRow] = useState<PayrollRow | null>(null);
   const [localTasks, setLocalTasks] = useState<any[]>([]);
   const [profile, setProfile] = useState<any>(null);
+  const [notifications, setNotifications] = useState<InAppNotification[]>([]);
+  const [recentKudos, setRecentKudos] = useState<any[]>([]);
+  const [showNotifPanel, setShowNotifPanel] = useState(false);
+  const notifShownRef = useRef(false);
 
   useEffect(() => {
     const role = localStorage.getItem('accessRole') as any;
     const empId = localStorage.getItem('employeeId');
     getReports({ role, employeeId: empId }).then(setReports).catch(() => {});
-    // Fix: getMonthlyPayroll requires year/month
     const now = new Date();
     getMonthlyPayroll(now.getFullYear(), now.getMonth() + 1).then(res => {
-        // Fix: res might not be an array or handle differently
-        if (Array.isArray(res.rows) && res.rows.length > 0) setPayrollRow(res.rows[0]);
+      if (Array.isArray(res.rows) && res.rows.length > 0) {
+        const myRow = res.rows.find((r: any) => r.employeeId === empId) || res.rows[0];
+        setPayrollRow(myRow);
+      }
     }).catch(() => {});
-    
-    getLeaveRequests().then(() => {}).catch(() => {}); // Removed unused setter if logic changed
-    getStockQuote(7).then(() => {}).catch(() => {});
-    getRecentKudos().then(() => {}).catch(() => {});
-    getOnboardingChecklist().then(() => {}).catch(() => {});
-    
+    getRecentKudos().then(setRecentKudos).catch(() => {});
     const p = localStorage.getItem('userProfile');
     if (p) setProfile(JSON.parse(p));
+
+    // ── Login-time notification pop-ups ──
+    if (!notifShownRef.current) {
+      notifShownRef.current = true;
+      getInAppNotifications(20).then(notifs => {
+        const unread = notifs.filter(n => !n.isRead);
+        setNotifications(notifs);
+        if (unread.length === 0) return;
+
+        // Show first 3 as toasts with a slight delay between each
+        const toShow = unread.slice(0, 3);
+        toShow.forEach((n, i) => {
+          setTimeout(() => {
+            const icon = n.type === 'success' ? '🎉' : n.type === 'warning' ? '⚠️' : n.type === 'task' ? '📋' : '🔔';
+            const toastFn = n.type === 'success' ? toast.success
+              : n.type === 'warning' ? toast.warning
+              : toast.info;
+            toastFn(`${icon} ${n.message}`, {
+              duration: 6000,
+              description: n.createdAt ? `${new Date(n.createdAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : undefined,
+            });
+          }, i * 800);
+        });
+
+        if (unread.length > 3) {
+          setTimeout(() => {
+            toast.info(`🔔 You have ${unread.length - 3} more unread notifications`, {
+              description: 'Click the bell icon to view all',
+              duration: 5000,
+            });
+          }, 3 * 800 + 400);
+        }
+      }).catch(() => {});
+    }
   }, []);
 
   useEffect(() => {
-    // Fix: access correct property on ReportsResponse
     if (reports?.tasks) setLocalTasks(reports.tasks);
   }, [reports]);
+
+  const handleMarkAllRead = async () => {
+    await markAllNotificationsRead().catch(() => {});
+    setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+    toast.success('All notifications marked as read');
+  };
+
+  const unreadCount = notifications.filter(n => !n.isRead).length;
 
   const tasks = localTasks || [];
   const empId = localStorage.getItem('employeeId');
@@ -208,7 +278,10 @@ export default function EmployeeDashboard() {
         const updated = await updateTaskStatus({ id, status: status as any });
         setLocalTasks(prev => prev.map(p => p.id === id ? updated : p));
         toast.success(`Task moved to ${status}`);
-      } catch { toast.error('Move failed'); }
+      } catch (err: any) { 
+        const msg = err?.response?.data?.message || 'Move failed';
+        toast.error(msg); 
+      }
     }
   };
 
@@ -221,7 +294,73 @@ export default function EmployeeDashboard() {
           </h1>
           <p className="text-white/30 text-sm mt-1">Status check: {tasks.filter(t => t.status !== 'Completed').length} tasks remaining.</p>
         </div>
+
+        {/* Notification Bell */}
+        <div className="relative">
+          <button
+            onClick={() => setShowNotifPanel(v => !v)}
+            className="relative w-10 h-10 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 flex items-center justify-center transition-all"
+          >
+            <Bell className="w-4 h-4 text-white/60" />
+            {unreadCount > 0 && (
+              <span className="absolute -top-1 -right-1 w-5 h-5 bg-violet-500 text-white text-[10px] font-black rounded-full flex items-center justify-center animate-pulse">
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
+          </button>
+
+          {/* Notification Panel */}
+          <AnimatePresence>
+            {showNotifPanel && (
+              <motion.div
+                initial={{ opacity: 0, y: -8, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -8, scale: 0.96 }}
+                transition={{ duration: 0.15 }}
+                className="absolute right-0 top-12 w-80 z-50 rounded-2xl shadow-2xl overflow-hidden"
+                style={{ background: 'rgba(13,18,35,0.98)', border: '1px solid rgba(255,255,255,0.1)', backdropFilter: 'blur(20px)' }}
+              >
+                <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06]">
+                  <div className="flex items-center gap-2">
+                    <Bell className="w-4 h-4 text-violet-400" />
+                    <span className="text-white font-semibold text-sm">Notifications</span>
+                    {unreadCount > 0 && (
+                      <span className="bg-violet-500/20 text-violet-300 text-[10px] font-bold px-1.5 py-0.5 rounded-full">{unreadCount} new</span>
+                    )}
+                  </div>
+                  {unreadCount > 0 && (
+                    <button onClick={handleMarkAllRead} className="flex items-center gap-1 text-xs text-white/30 hover:text-white/60 transition-colors">
+                      <RefreshCw className="w-3 h-3" /> Mark all read
+                    </button>
+                  )}
+                </div>
+                <div className="max-h-72 overflow-y-auto divide-y divide-white/[0.04]">
+                  {notifications.length === 0 ? (
+                    <div className="py-8 text-center text-white/20 text-xs">No notifications yet</div>
+                  ) : notifications.map(n => (
+                    <div key={n.id} className={`px-4 py-3 flex items-start gap-3 transition-colors hover:bg-white/[0.03] ${!n.isRead ? 'bg-violet-500/[0.04]' : ''}`}>
+                      <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${
+                        n.type === 'success' ? 'bg-emerald-400' :
+                        n.type === 'warning' ? 'bg-amber-400' :
+                        n.type === 'task' ? 'bg-sky-400' : 'bg-violet-400'
+                      } ${!n.isRead ? '' : 'opacity-30'}`} />
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-xs leading-relaxed ${!n.isRead ? 'text-white/80' : 'text-white/40'}`}>{n.message}</p>
+                        {n.createdAt && (
+                          <p className="text-[10px] text-white/20 mt-0.5">
+                            {new Date(n.createdAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
+
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 page-enter" style={{ animationDelay: '60ms' }}>
         <StatCard title="Open Tasks" value={tasks.filter(t => t.status !== 'Completed').length} subtitle="In your queue" icon={CheckSquare} gradient="from-sky-500 to-blue-600" />
@@ -265,7 +404,7 @@ export default function EmployeeDashboard() {
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95 }}
                       >
-                        <TaskCard task={t} getPriorityColor={getPriorityColor} />
+                        <TaskCard task={t} getPriorityColor={getPriorityColor} setLocalTasks={setLocalTasks} />
                       </motion.div>
                     ))}
                   </AnimatePresence>
@@ -280,6 +419,30 @@ export default function EmployeeDashboard() {
           
           <div className="glass-card rounded-2xl p-6">
             <div className="flex items-center gap-2 mb-6">
+              <Heart className="w-5 h-5 text-pink-400" />
+              <h3 className="text-white font-bold text-lg">Team Recognition</h3>
+            </div>
+            <div className="space-y-4">
+              {recentKudos.length === 0 ? (
+                <div className="text-white/20 text-xs text-center py-4">No recent kudos</div>
+              ) : recentKudos.slice(0, 3).map((k) => (
+                <div key={k.id} className="flex gap-3 items-start group">
+                  <div className="w-8 h-8 rounded-full bg-pink-500/10 flex items-center justify-center shrink-0 mt-0.5 group-hover:scale-110 transition-transform">
+                    <Heart className="w-4 h-4 text-pink-400 fill-pink-400/20" />
+                  </div>
+                  <div>
+                    <p className="text-xs text-white/70 leading-relaxed">
+                      <span className="font-bold text-white">{k.senderName}</span> appreciated <span className="font-bold text-white">{k.receiverName}</span>
+                    </p>
+                    <p className="text-[10px] text-pink-300/60 mt-1 font-medium">{k.category}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="glass-card rounded-2xl p-6">
+            <div className="flex items-center gap-2 mb-6">
               <Wallet className="w-5 h-5 text-violet-400" />
               <h3 className="text-white font-bold text-lg">Pay Summary</h3>
             </div>
@@ -290,7 +453,15 @@ export default function EmployeeDashboard() {
                     <span className="text-[10px] font-bold text-white/20 uppercase block mb-1">Estimated Net</span>
                     <div className="text-3xl font-black text-white tabular-nums">{formatINR(payrollRow.netSalary)}</div>
                   </div>
-                  <Button onClick={() => toast.success('Slip requested')} size="sm" className="bg-white/10 hover:bg-white/20 text-white border-0 rounded-xl h-9 px-4">
+                  <Button onClick={async () => {
+                    try {
+                      const now = new Date();
+                      await requestPayslip(now.getMonth() + 1, now.getFullYear());
+                      toast.success('Payslip requested from your manager');
+                    } catch (e) {
+                      toast.error('Failed to request slip');
+                    }
+                  }} size="sm" className="bg-white/10 hover:bg-white/20 text-white border-0 rounded-xl h-9 px-4">
                     <Download className="w-4 h-4" />
                   </Button>
                 </div>

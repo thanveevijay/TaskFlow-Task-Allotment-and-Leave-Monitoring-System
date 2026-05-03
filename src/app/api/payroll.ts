@@ -39,3 +39,11 @@ export async function getMonthlyPayroll(year: number, month: number): Promise<Mo
   });
   return res.data;
 }
+
+export async function requestPayslip(month: number, year: number): Promise<void> {
+  await api.post("/payroll/request-slip", { month, year });
+}
+
+export async function sendPayslip(employeeId: string, month: number, year: number): Promise<void> {
+  await api.post("/payroll/send-slip", { employeeId, month, year });
+}

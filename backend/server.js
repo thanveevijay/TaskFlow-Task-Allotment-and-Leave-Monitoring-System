@@ -284,6 +284,7 @@ function employeePublicDTO(e) {
     email: e.email,
     department: e.department || "",
     role: e.jobRole || "",
+    accessRole: e.accessRole || "employee",
     avatar: e.avatar || "",
     avatarUrl: e.avatarUrl || "",
     leaveBalance: e.leaveBalance ?? 0,
@@ -490,6 +491,10 @@ async function ensureEmployeeAvatars() {
 
 async function seedIfEmpty() {
   const employeesCount = await Employee.countDocuments();
+  if (employeesCount > 0) {
+    console.log(`[Database] ${employeesCount} employees found — skipping seed. Run 'node scripts/reset-seed.js' to reset.`);
+    return;
+  }
   const isGeneric = await Employee.findOne({ name: { $regex: /Employee|Piyush|Reyansh/i } });
   
   if (isGeneric || employeesCount < 10) {
@@ -1011,12 +1016,16 @@ app.patch("/tasks/:id/status", authenticate, async (req, res) => {
   const task = await Task.findById(req.params.id);
   if (!task) return res.status(404).json({ message: "Task not found" });
 
+  // NOTE: Relaxing the checklist requirement as per user request to allow moving tasks to completed freely.
+  /*
   if (req.body.status === "Completed") {
     const uncompletedChecklists = task.checklists.filter(c => !c.isCompleted);
     if (uncompletedChecklists.length > 0) {
       return res.status(400).json({ message: "Cannot complete task: uncompleted checklist items remain." });
     }
   }
+  */
+
 
   const oldStatus = task.status;
   task.status = req.body.status;
@@ -1077,7 +1086,12 @@ app.get("/employees", authenticate, async (req, res) => {
   }
 
   const employees = await Employee.find(employeeFilter).select("-password");
-  const tasks = await Task.find(employeeFilter.department ? { dept: employeeFilter.department } : {});
+  const validEmployeeIds = employees.map(e => e._id);
+  
+  const taskFilter = employeeFilter.department 
+    ? { $or: [{ assignedToId: { $in: validEmployeeIds } }, { assignedToId: null }] } 
+    : {};
+  const tasks = await Task.find(taskFilter);
   const result = employees.map((e) => {
     const dto = employeePublicDTO(e);
     dto.tasksCompleted = tasks.filter((t) => String(t.assignedToId) === String(e._id) && t.status === "Completed").length;
@@ -1253,11 +1267,13 @@ app.get("/reports", authenticate, async (req, res) => {
   }
 
   const employeeFilter = mgrDept ? { department: mgrDept } : {};
-  const taskFilter = mgrDept ? { dept: mgrDept } : {};
-
   const employees = await Employee.find(employeeFilter).select("-password");
   const empIds = employees.map(e => String(e._id));
   
+  const taskFilter = mgrDept 
+    ? { $or: [{ assignedToId: { $in: employees.map(e => e._id) } }, { assignedToId: null }] } 
+    : {};
+
   const tasks = await Task.find(taskFilter);
   const leaveRequests = await LeaveRequest.find({ employeeId: { $in: empIds } });
   
@@ -1285,7 +1301,12 @@ app.get("/reports", authenticate, async (req, res) => {
     inProgressTasks: filteredTasks.filter((t) => t.status === "In Progress").length,
     employeesOnLeave: uniqueEmployeesOnLeave,
     tasks: filteredTasks.map(toTaskDTO),
-    employees: employees.map(employeePublicDTO),
+    employees: employees.map((e) => {
+      const dto = employeePublicDTO(e);
+      dto.tasksCompleted = tasks.filter((t) => String(t.assignedToId) === String(e._id) && t.status === "Completed").length;
+      dto.tasksInProgress = tasks.filter((t) => String(t.assignedToId) === String(e._id) && t.status !== "Completed").length;
+      return dto;
+    }),
     leaveRequests: filteredLeave.map(toLeaveDTO),
   });
 });
@@ -1295,13 +1316,18 @@ app.get("/reports/departments", authenticate, async (req, res) => {
   const year = Number(req.query.year) || new Date().getFullYear();
   
   let employeeFilter = {};
-  if (req.user.role === "manager") {
+  if (req.user.role === "manager" && req.query.includeAll !== "1") {
     const mgrDept = await getManagerDepartment(req);
     if (mgrDept) employeeFilter.department = mgrDept;
   }
 
   const employees = await Employee.find(employeeFilter).select("-password");
-  const tasks = await Task.find(employeeFilter.department ? { dept: employeeFilter.department } : {});
+  const validEmployeeIds = employees.map(e => e._id);
+  
+  const taskFilter = employeeFilter.department 
+    ? { $or: [{ assignedToId: { $in: validEmployeeIds } }, { assignedToId: null }] } 
+    : {};
+  const tasks = await Task.find(taskFilter);
   const leaveRequests = await LeaveRequest.find();
 
   const deptMap = {};
@@ -1347,10 +1373,14 @@ app.get("/reports/workload", authenticate, async (req, res) => {
   }
 
   const employees = await Employee.find(employeeFilter).select("-password");
-  const tasks = await Task.find({ 
-    status: { $in: ["Pending", "In Progress"] },
-    ...(employeeFilter.department ? { dept: employeeFilter.department } : {})
-  });
+  const validEmployeeIds = employees.map(e => e._id);
+  
+  const taskFilter = { status: { $in: ["Pending", "In Progress"] } };
+  if (employeeFilter.department) {
+    taskFilter.$or = [{ assignedToId: { $in: validEmployeeIds } }, { assignedToId: null }];
+  }
+  
+  const tasks = await Task.find(taskFilter);
   const rows = [];
   for (const e of employees) {
     const empTasks = tasks.filter((t) => String(t.assignedToId) === String(e._id));
@@ -1395,6 +1425,100 @@ app.get("/payroll/monthly", authenticate, async (req, res) => {
   const leaveRequests = await LeaveRequest.find({ status: "Approved" });
   const rows = employees.map((e) => computePayrollRow(e, leaveRequests, year, month));
   res.json({ year, month, policy: getSalaryPolicyDTO(), rows });
+});
+
+app.post("/payroll/request-slip", authenticate, async (req, res) => {
+  const { month, year } = req.body;
+  const employee = await Employee.findById(req.user.id);
+  if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+  const manager = await Employee.findOne({ department: employee.department, accessRole: "manager" });
+  if (manager) {
+    await Notification.create({
+      userId: manager._id,
+      type: "warning",
+      message: `${employee.name} has requested their payslip for ${month}/${year}.`,
+      isRead: false,
+      link: "/reports", // managers check payroll in reports
+    });
+  }
+  res.json({ ok: true, message: "Payslip requested" });
+});
+
+app.post("/payroll/send-slip", authenticate, async (req, res) => {
+  const { employeeId, month, year } = req.body;
+  const employee = await Employee.findById(employeeId);
+  if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+  await Notification.create({
+    userId: employee._id,
+    type: "success",
+    message: `Your payslip for ${month}/${year} is now available.`,
+    isRead: false,
+    link: "/dashboard", // employees check payroll in dashboard
+  });
+
+  res.json({ ok: true, message: "Payslip sent" });
+});
+
+// ──────────────────────────────────────────────────────────
+// KUDOS
+// ──────────────────────────────────────────────────────────
+
+app.post("/kudos", authenticate, async (req, res) => {
+  const { receiverId, taskId, category, message } = req.body;
+  const senderId = req.user.id;
+  const kudos = await Kudos.create({ senderId, receiverId, taskId, category, message });
+  
+  const sender = await Employee.findById(senderId);
+  const receiver = await Employee.findById(receiverId);
+
+  await Notification.create({
+    userId: receiverId,
+    type: "success",
+    message: `${sender ? sender.name : 'Someone'} gave you kudos for ${category}!`,
+    isRead: false,
+    link: "/dashboard"
+  });
+
+  res.status(201).json({
+    id: kudos._id.toString(),
+    senderName: sender?.name,
+    receiverName: receiver?.name,
+    category: kudos.category,
+    message: kudos.message,
+    createdAt: kudos.createdAt
+  });
+});
+
+app.get("/kudos/recent", authenticate, async (req, res) => {
+  const docs = await Kudos.find().sort({ createdAt: -1 }).limit(10).populate("senderId receiverId");
+  const items = docs.map(k => ({
+    id: k._id.toString(),
+    senderName: k.senderId ? k.senderId.name : "Unknown",
+    receiverName: k.receiverId ? k.receiverId.name : "Unknown",
+    category: k.category,
+    message: k.message,
+    createdAt: k.createdAt
+  }));
+  res.json(items);
+});
+
+app.get("/kudos/leaderboard", authenticate, async (req, res) => {
+  const result = await Kudos.aggregate([
+    { $group: { _id: "$receiverId", count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+    { $limit: 5 }
+  ]);
+  
+  const populated = await Employee.populate(result, { path: "_id", select: "name" });
+  const items = populated.map(p => ({
+    employeeId: p._id?._id?.toString() || p._id?.toString() || "unknown",
+    employeeName: p._id?.name || "Team Member",
+    count: p.count
+  }));
+  
+  res.json({ items });
 });
 
 // ──────────────────────────────────────────────────────────

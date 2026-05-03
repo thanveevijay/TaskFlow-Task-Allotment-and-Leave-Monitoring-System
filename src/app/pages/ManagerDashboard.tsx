@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Button } from '../components/ui/button';
 import {
   TrendingDown, TrendingUp, UserX,
-  AlertCircle, Trophy, Zap, Activity, Layers, ChevronRight,
+  AlertCircle, Trophy, Zap, Activity, Layers, ChevronRight, Bell, RefreshCw, Heart,
 } from 'lucide-react';
+import { getInAppNotifications, markAllNotificationsRead, type InAppNotification } from '../api/notifications';
 import {
   PieChart, Pie, Cell, ResponsiveContainer,
   Tooltip,
@@ -12,7 +13,7 @@ import { getReports, type ReportsResponse } from '../api/reports';
 import { getTeamWorkload, type WorkloadDay, type WorkloadResponse } from '../api/workload';
 import { getStockQuote } from '../api/stock';
 import { getDepartmentAnalytics, type DepartmentMetric } from '../api/reports';
-import { getKudosLeaderboard } from '../api/kudos';
+import { getKudosLeaderboard, getRecentKudos, type KudosItem } from '../api/kudos';
 import { getSmartSuggestions, reassignTask } from '../api/tasks';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { TeamHeatmap } from '../components/TeamHeatmap';
@@ -155,19 +156,67 @@ export default function ManagerDashboard() {
   const [leaderboard, setLeaderboard] = useState<{ employeeId: string; employeeName: string; count: number }[]>([]);
   const [suggestions, setSuggestions] = useState<{ id: string; title: string; suggestedSubstitutes: { id: string; name: string }[] }[]>([]);
   const [departmentRows, setDepartmentRows] = useState<DepartmentMetric[]>([]);
+  const [notifications, setNotifications] = useState<InAppNotification[]>([]);
+  const [showNotifPanel, setShowNotifPanel] = useState(false);
+  const notifShownRef = useRef(false);
 
   useEffect(() => {
     getReports({ role: 'manager' }).then(setReports).catch(console.error);
     const d = new Date();
     getDepartmentAnalytics(d.getMonth() + 1, d.getFullYear(), true)
       .then((r) => setDepartmentRows(r.rows)).catch(() => setDepartmentRows([]));
+
+    // Login-time notification pop-ups
+    if (!notifShownRef.current) {
+      notifShownRef.current = true;
+      getInAppNotifications(20).then(notifs => {
+        const unread = notifs.filter(n => !n.isRead);
+        setNotifications(notifs);
+        if (unread.length === 0) return;
+
+        const toShow = unread.slice(0, 3);
+        toShow.forEach((n, i) => {
+          setTimeout(() => {
+            const icon = n.type === 'success' ? '🎉' : n.type === 'warning' ? '⚠️' : n.type === 'task' ? '📋' : '🔔';
+            const toastFn = n.type === 'success' ? toast.success
+              : n.type === 'warning' ? toast.warning
+              : toast.info;
+            toastFn(`${icon} ${n.message}`, {
+              duration: 6000,
+              description: n.createdAt ? `${new Date(n.createdAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : undefined,
+            });
+          }, i * 800);
+        });
+
+        if (unread.length > 3) {
+          setTimeout(() => {
+            toast.info(`🔔 You have ${unread.length - 3} more unread notifications`, {
+              description: 'Click the bell icon to view all',
+              duration: 5000,
+            });
+          }, 3 * 800 + 400);
+        }
+      }).catch(() => {});
+    }
   }, []);
 
+  const handleMarkAllRead = async () => {
+    await markAllNotificationsRead().catch(() => {});
+    setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+    toast.success('All notifications marked as read');
+  };
+
+  const unreadCount = notifications.filter(n => !n.isRead).length;
+
+
   useEffect(() => { getTeamWorkload(week).then(setWorkload).catch(() => setWorkload(null)); }, [week]);
+
+  const [recentKudos, setRecentKudos] = useState<KudosItem[]>([]);
 
   useEffect(() => {
     getStockQuote(7).then((q) => setStock({ symbol: q.symbol, currentPrice: q.currentPrice, changePct: q.changePct })).catch(() => setStock(null));
     getKudosLeaderboard().then((r) => setLeaderboard(r.items)).catch(() => setLeaderboard([]));
+    getRecentKudos().then(setRecentKudos).catch(() => setRecentKudos([]));
     getSmartSuggestions().then((r) => setSuggestions(r.items as any)).catch(() => setSuggestions([]));
   }, []);
 
@@ -202,6 +251,70 @@ export default function ManagerDashboard() {
               : 'bg-amber-500/15 text-amber-400 border border-amber-500/20'}`}>
               <Activity className="w-4 h-4" />
               {completionRate}% Completion
+            </div>
+
+            {/* Notification Bell */}
+            <div className="relative z-50">
+              <button
+                onClick={() => setShowNotifPanel(v => !v)}
+                className="relative w-10 h-10 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 flex items-center justify-center transition-all"
+              >
+                <Bell className="w-4 h-4 text-white/60" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-violet-500 text-white text-[10px] font-black rounded-full flex items-center justify-center animate-pulse">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </button>
+
+              <AnimatePresence>
+                {showNotifPanel && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -8, scale: 0.96 }}
+                    transition={{ duration: 0.15 }}
+                    className="absolute right-0 top-12 w-80 z-50 rounded-2xl shadow-2xl overflow-hidden"
+                    style={{ background: 'rgba(13,18,35,0.98)', border: '1px solid rgba(255,255,255,0.1)', backdropFilter: 'blur(20px)' }}
+                  >
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06]">
+                      <div className="flex items-center gap-2">
+                        <Bell className="w-4 h-4 text-violet-400" />
+                        <span className="text-white font-semibold text-sm">Notifications</span>
+                        {unreadCount > 0 && (
+                          <span className="bg-violet-500/20 text-violet-300 text-[10px] font-bold px-1.5 py-0.5 rounded-full">{unreadCount} new</span>
+                        )}
+                      </div>
+                      {unreadCount > 0 && (
+                        <button onClick={handleMarkAllRead} className="flex items-center gap-1 text-xs text-white/30 hover:text-white/60 transition-colors">
+                          <RefreshCw className="w-3 h-3" /> Mark all read
+                        </button>
+                      )}
+                    </div>
+                    <div className="max-h-72 overflow-y-auto divide-y divide-white/[0.04]">
+                      {notifications.length === 0 ? (
+                        <div className="py-8 text-center text-white/20 text-xs">No notifications yet</div>
+                      ) : notifications.map(n => (
+                        <div key={n.id} className={`px-4 py-3 flex items-start gap-3 transition-colors hover:bg-white/[0.03] ${!n.isRead ? 'bg-violet-500/[0.04]' : ''}`}>
+                          <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${
+                            n.type === 'success' ? 'bg-emerald-400' :
+                            n.type === 'warning' ? 'bg-amber-400' :
+                            n.type === 'task' ? 'bg-sky-400' : 'bg-violet-400'
+                          } ${!n.isRead ? '' : 'opacity-30'}`} />
+                          <div className="flex-1 min-w-0">
+                            <p className={`text-xs leading-relaxed ${!n.isRead ? 'text-white/80' : 'text-white/40'}`}>{n.message}</p>
+                            {n.createdAt && (
+                              <p className="text-[10px] text-white/20 mt-0.5">
+                                {new Date(n.createdAt).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </div>
         </div>
@@ -315,22 +428,37 @@ export default function ManagerDashboard() {
         <div className="lg:col-span-7 space-y-8">
           <TeamHeatmap />
           
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            {stock && (
-              <div className="glass-card rounded-2xl p-5 hover:bg-white/[0.05] transition-colors cursor-default">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="text-xs tracking-widest text-white/30 font-bold uppercase">{stock.symbol}</div>
-                  <div className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                    stock.changePct >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
-                    {stock.changePct >= 0 ? '+' : ''}{stock.changePct.toFixed(2)}%
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Team Health Score — replaces stock ticker */}
+              {(() => {
+                const healthScore = Math.min(100, Math.max(0,
+                  Math.round(completionRate * 0.5 + (overdueTasks === 0 ? 25 : Math.max(0, 25 - overdueTasks * 4)) + (inProgressTasks > 0 ? 25 : 10))
+                ));
+                const trend = healthScore >= 75 ? 'up' : healthScore >= 50 ? 'neutral' : 'down';
+                const trendColor = trend === 'up' ? '#10b981' : trend === 'neutral' ? '#f59e0b' : '#f43f5e';
+                const label = trend === 'up' ? 'Healthy' : trend === 'neutral' ? 'At Risk' : 'Critical';
+                return (
+                  <div className="glass-card rounded-2xl p-5 hover:bg-white/[0.05] transition-colors cursor-default">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="text-xs tracking-widest text-white/30 font-bold uppercase">Team Health</div>
+                      <div className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold`}
+                        style={{ background: `${trendColor}20`, color: trendColor }}>
+                        {label}
+                      </div>
+                    </div>
+                    <div className="flex items-end justify-between">
+                      <div>
+                        <div className="text-3xl font-black text-white">{healthScore}<span className="text-lg text-white/30">/100</span></div>
+                        <div className="text-[10px] text-white/30 mt-1">{overdueTasks > 0 ? `${overdueTasks} overdue tasks` : 'No overdue tasks 🎉'}</div>
+                      </div>
+                      <Sparkline values={[40, 55, healthScore - 10, healthScore - 5, healthScore, healthScore + 2, healthScore]} color={trendColor} />
+                    </div>
+                    <div className="mt-3 h-1 bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-700" style={{ width: `${healthScore}%`, background: `linear-gradient(90deg, ${trendColor}88, ${trendColor})` }} />
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-end justify-between">
-                  <div className="text-3xl font-black text-white">${stock.currentPrice.toFixed(2)}</div>
-                  <Sparkline values={[20,40,30,60,50,80,75]} color={stock.changePct >= 0 ? '#10b981' : '#f43f5e'} />
-                </div>
-              </div>
-            )}
+                );
+              })()}
 
             <div className="glass-card rounded-2xl p-5">
               <div className="flex items-center gap-2 mb-4">
@@ -338,16 +466,40 @@ export default function ManagerDashboard() {
                 <h3 className="text-white font-bold text-xs uppercase tracking-wider">Top Recognition</h3>
               </div>
               <div className="space-y-3">
-                {leaderboard.slice(0, 3).map((x) => (
+                {leaderboard.length === 0 ? (
+                  <div className="text-white/20 text-xs text-center py-4">No recognition data yet</div>
+                ) : leaderboard.slice(0, 3).map((x) => (
                   <div key={x.employeeId} className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-xs font-bold text-white/40">
-                        {x.employeeName.charAt(0)}
+                        {x.employeeName ? x.employeeName.charAt(0) : '?'}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold text-white truncate">{x.employeeName}</div>
+                        <div className="text-sm font-semibold text-white truncate">{x.employeeName || 'Unknown'}</div>
                         <div className="text-[10px] text-white/30">{x.count} points</div>
                       </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="glass-card rounded-2xl p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Heart className="w-4 h-4 text-pink-400" />
+                <h3 className="text-white font-bold text-xs uppercase tracking-wider">Recent Kudos</h3>
+              </div>
+              <div className="space-y-4">
+                {recentKudos.length === 0 ? (
+                  <div className="text-white/20 text-xs text-center py-4">No kudos given yet</div>
+                ) : recentKudos.slice(0, 3).map((k) => (
+                  <div key={k.id} className="flex gap-2 items-start">
+                    <div className="w-6 h-6 rounded-full bg-pink-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                      <Heart className="w-3 h-3 text-pink-400" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-white/80"><span className="font-semibold text-white">{k.senderName}</span> gave kudos to <span className="font-semibold text-white">{k.receiverName}</span></p>
+                      <p className="text-[10px] text-pink-300/70 mt-0.5">{k.category}</p>
                     </div>
                   </div>
                 ))}
