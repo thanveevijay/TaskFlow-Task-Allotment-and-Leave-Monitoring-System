@@ -44,7 +44,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-insecure-change-me";
 const JWT_EXPIRES = process.env.JWT_EXPIRES || "7d";
 
 if (process.env.NODE_ENV === "production" && JWT_SECRET === "dev-insecure-change-me") {
-  console.warn("JWT_SECRET is using dev default; set a strong secret in production.");
+  throw new Error("Refusing to start in production with the default JWT_SECRET. Set a strong random secret.");
 }
 
 const app = express();
@@ -183,7 +183,10 @@ function parseManagerDeptAccessCodes() {
     Finance: "FIN-ACCESS-2026",
     Operations: "OPS-ACCESS-2026",
   };
-  if (!raw) return fallback;
+  if (!raw) {
+    // Preserve demo convenience locally, but never allow public default access codes in production.
+    return process.env.NODE_ENV === "production" ? {} : fallback;
+  }
   const out = {};
   for (const pair of raw.split(",")) {
     const [k, v] = pair.split(":");
